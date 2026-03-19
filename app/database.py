@@ -4,6 +4,7 @@ Provee el engine async, la sessionmaker y la dependency `get_db` para FastAPI.
 """
 
 from collections.abc import AsyncGenerator
+from contextlib import asynccontextmanager
 from typing import Any
 
 from sqlalchemy.ext.asyncio import (
@@ -49,6 +50,20 @@ def init_db(database_url: str) -> None:
 
 async def get_db() -> AsyncGenerator[AsyncSession, None]:
     """Dependency de FastAPI que provee una sesión de base de datos por request."""
+    if _async_session_factory is None:
+        raise RuntimeError("Database not initialized. Call init_db() first.")
+    async with _async_session_factory() as session:
+        try:
+            yield session
+            await session.commit()
+        except Exception:
+            await session.rollback()
+            raise
+
+
+@asynccontextmanager
+async def get_session() -> AsyncGenerator[AsyncSession, None]:
+    """Context manager para obtener sesión DB fuera del contexto FastAPI (ej: bot de Telegram)."""
     if _async_session_factory is None:
         raise RuntimeError("Database not initialized. Call init_db() first.")
     async with _async_session_factory() as session:
