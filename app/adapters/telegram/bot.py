@@ -27,6 +27,7 @@ from app.domain.models.pantry_item import PantryItem
 from app.domain.services.consumption_ratio_service import ConsumptionRatioService
 from app.domain.services.energy_mode_service import EnergyModeService, EnergyState
 from app.domain.services.health_service import HealthService
+from app.domain.services.mood_food_service import MoodFoodService
 from app.domain.services.pantry_service import PantryService
 from app.domain.services.planning_service import PlanningService
 from app.domain.services.swap_service import SwapService
@@ -904,10 +905,153 @@ async def cmd_ayuda(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "♻️ *Anti-desperdicio (ADR-008)*\n"
         "/vencimientos — Items próximos a vencer + riesgo de desperdicio\n"
         "/desperdicio — Reporte completo de riesgo de desperdicio\n\n"
+        "🧠 *Mood & Food*\n"
+        "/mood — Correlaciones bienestar↔alimentación (requiere 4 semanas de datos)\n"
+        "/reporte — Reporte semanal consolidado salud + plan + insight\n\n"
         "❌ /cancelar — Abortar conversación activa"
     )
     await update.message.reply_text(text, parse_mode="Markdown")
     await log_interaction(int(update.effective_chat.id), "/ayuda", True)
+
+
+# ──────────────────────────────────────────────────────────── /mood ──────
+
+@authorized_only
+async def cmd_mood(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Análisis Mood & Food: correlaciones entre bienestar y alimentación."""
+    chat_id = str(update.effective_chat.id)
+    async with get_session() as session:
+        user_repo = UserRepository(session)
+        profile = await user_repo.get_profile_by_chat_id(chat_id)
+        if profile is None:
+            await update.message.reply_text("❌ Primero configurá tu perfil con /setup.")
+            return
+
+        health_repo = HealthRepository(session)
+        planning_repo = PlanningRepository(session)
+
+        settings = get_settings()
+        try:
+            from app.adapters.ai.deepseek_adapter import DeepSeekAdapter
+            llm = DeepSeekAdapter(settings.deepseek_api_key, settings.deepseek_base_url, settings.deepseek_model)
+        except Exception:
+            llm = None
+
+        mood_service = MoodFoodService(health_repo, planning_repo, llm)
+        has_data, weeks = await mood_service.has_enough_data(profile.id)
+
+    if not has_data:
+        from math import ceil
+        MIN_WEEKS = 4
+        progress = min(weeks / MIN_WEEKS, 1.0)
+        bar_filled = int(progress * 16)
+        bar = "█" * bar_filled + "░" * (16 - bar_filled)
+        await update.message.reply_text(
+            f"📊 *Mood & Food* necesita al menos *4 semanas* de datos.\n"
+            f"Llevás *{weeks} semana{'s' if weeks != 1 else ''}*. ¡Seguí registrando con /salud!\n\n"
+            f"`{bar}` {progress:.0%}",
+            parse_mode="Markdown",
+        )
+        await log_interaction(int(chat_id), "/mood", True)
+        return
+
+    async with get_session() as session:
+        health_repo = HealthRepository(session)
+        planning_repo = PlanningRepository(session)
+        mood_service = MoodFoodService(health_repo, planning_repo, llm)
+        corr_data = await mood_service.calculate_correlations(profile.id)
+        insights = await mood_service.generate_insights(profile.id)
+
+    lines = [f"🧠 *Análisis Mood & Food* (últimas {corr_data['weeks_analyzed']} semanas)\n"]
+
+    # Mostrar correlaciones clave
+    corrs = corr_data.get("correlations", {})
+    def _corr_str(key: str, label: str) -> str:
+        val = corrs.get(key)
+        if val is None:
+            return ""
+        arrow = "↑" if val > 0.2 else "↓" if val < -0.2 else "→"
+        return f"  {arrow} {label}: `{val:+.2f}`"
+
+    corr_lines = [
+        _corr_str("sleep_score_vs_stress_level", "Sueño ↔ Estrés"),
+        _corr_str("sleep_score_vs_hrv", "Sueño ↔ HRV"),
+        _corr_str("stress_level_vs_plan_cost", "Estrés ↔ Costo Plan"),
+    ]
+    corr_lines = [l for l in corr_lines if l]
+    if corr_lines:
+        lines.append("📈 *Correlaciones:*")
+        lines.extend(corr_lines)
+        lines.append("")
+
+    if insights:
+        lines.append("💡 *Insights:*")
+        for i, ins in enumerate(insights[:3], 1):
+            lines.append(f"{i}. {ins.get('insight', '')}")
+        lines.append(f"\n🎯 *Recomendación:* {insights[0].get('recommendation', '')}")
+    else:
+        lines.append("_Sin suficientes datos para generar insights con IA._")
+
+    await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+    await log_interaction(int(chat_id), "/mood", True)
+
+
+# ─────────────────────────────────────────────────────────── /reporte ──────
+
+@authorized_only
+async def cmd_reporte(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Reporte semanal consolidado: salud + plan + insight principal."""
+    chat_id = str(update.effective_chat.id)
+    async with get_session() as session:
+        user_repo = UserRepository(session)
+        profile = await user_repo.get_profile_by_chat_id(chat_id)
+        if profile is None:
+            await update.message.reply_text("❌ Primero configurá tu perfil con /setup.")
+            return
+
+        health_repo = HealthRepository(session)
+        planning_repo = PlanningRepository(session)
+
+        settings = get_settings()
+        try:
+            from app.adapters.ai.deepseek_adapter import DeepSeekAdapter
+            llm = DeepSeekAdapter(settings.deepseek_api_key, settings.deepseek_base_url, settings.deepseek_model)
+        except Exception:
+            llm = None
+
+        mood_service = MoodFoodService(health_repo, planning_repo, llm)
+        report = await mood_service.get_weekly_report(profile.id)
+
+    h = report.get("health_summary", {})
+    p = report.get("plan_summary", {})
+
+    sleep_str = f"{h['avg_sleep']}/100" if h.get("avg_sleep") else "sin datos"
+    stress_str = h.get("avg_stress", "sin datos") or "sin datos"
+    steps_str = f"{h['avg_steps']:,}".replace(",", ".") if h.get("avg_steps") else "sin datos"
+    cost_str = _format_ars(p["cost_ars"]) if p.get("cost_ars") else "sin plan"
+
+    lines = [
+        f"📋 *Reporte Semanal — {report.get('week', '?')}*\n",
+        "🏃 *Salud:*",
+        f"  😴 Sueño promedio: {sleep_str}",
+        f"  😤 Estrés: {stress_str}",
+        f"  👣 Pasos: {steps_str}",
+        "",
+        "🍽️ *Plan:*",
+        f"  💰 Costo estimado: {cost_str} ARS",
+    ]
+
+    if report.get("mood_food_insight"):
+        lines.extend([
+            "",
+            f"💡 *Insight:* {report['mood_food_insight']}",
+        ])
+
+    if report.get("recommendation_for_next_week"):
+        lines.append(f"🎯 *Para la próxima semana:* {report['recommendation_for_next_week']}")
+
+    await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+    await log_interaction(int(chat_id), "/reporte", True)
 
 
 # ──────────────────────────────────────── Factory ──────
@@ -944,6 +1088,9 @@ def create_telegram_bot() -> Application:
     application.add_handler(CommandHandler("precio_detalle", cmd_precio_detalle))
     application.add_handler(CommandHandler("vencimientos", cmd_vencimientos))
     application.add_handler(CommandHandler("desperdicio", cmd_desperdicio))
+    # Fase 4B — Mood & Food
+    application.add_handler(CommandHandler("mood", cmd_mood))
+    application.add_handler(CommandHandler("reporte", cmd_reporte))
 
     logger.info("Telegram bot configured with %d handlers", len(application.handlers))
     return application

@@ -38,6 +38,13 @@ class Settings(BaseSettings):
     jwt_secret_key: str = Field(..., description="Clave secreta para firmar JWTs")
     jwt_algorithm: str = Field("HS256", description="Algoritmo JWT")
     jwt_expiration_minutes: int = Field(30, description="Tiempo de expiración del JWT en minutos")
+    encryption_key: str | None = Field(
+        None,
+        description=(
+            "Clave Fernet para cifrado de datos sensibles. "
+            "Generar con: python -c \"from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())\""
+        ),
+    )
 
     # === App ===
     app_env: Literal["development", "staging", "production"] = Field(
