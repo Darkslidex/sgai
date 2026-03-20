@@ -14,6 +14,8 @@ from app.domain.models.pantry_item import PantryItem
 from app.domain.ports.market_repository import MarketRepositoryPort
 
 
+
+
 class MarketRepository(MarketRepositoryPort):
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
@@ -82,6 +84,22 @@ class MarketRepository(MarketRepositoryPort):
         )
         return [pantry_item_to_domain(row) for row in result.scalars()]
 
+    async def get_prices_by_source(
+        self, ingredient_id: int, source: str, days: int = 30
+    ) -> list[MarketPrice]:
+        """Retorna precios filtrados por fuente, ordenados por fecha descendente."""
+        cutoff = date.today() - timedelta(days=days)
+        result = await self._session.execute(
+            select(MarketPriceORM)
+            .where(
+                MarketPriceORM.ingredient_id == ingredient_id,
+                MarketPriceORM.source == source,
+                MarketPriceORM.date >= cutoff,
+            )
+            .order_by(MarketPriceORM.date.desc())
+        )
+        return [market_price_to_domain(row) for row in result.scalars()]
+
     async def update_pantry(self, item: PantryItem) -> PantryItem:
         # Upsert: buscar por user_id + ingredient_id
         result = await self._session.execute(
@@ -113,3 +131,57 @@ class MarketRepository(MarketRepositoryPort):
         await self._session.flush()
         await self._session.refresh(orm)
         return pantry_item_to_domain(orm)
+
+    async def get_pantry_item(self, user_id: int, ingredient_id: int) -> PantryItem | None:
+        """Retorna un item específico del pantry, o None si no existe."""
+        result = await self._session.execute(
+            select(PantryItemORM).where(
+                PantryItemORM.user_id == user_id,
+                PantryItemORM.ingredient_id == ingredient_id,
+            )
+        )
+        orm = result.scalar_one_or_none()
+        return pantry_item_to_domain(orm) if orm else None
+
+    async def delete_pantry_item(self, user_id: int, ingredient_id: int) -> None:
+        """Elimina un item del pantry (cantidad consumida o descartada)."""
+        result = await self._session.execute(
+            select(PantryItemORM).where(
+                PantryItemORM.user_id == user_id,
+                PantryItemORM.ingredient_id == ingredient_id,
+            )
+        )
+        orm = result.scalar_one_or_none()
+        if orm is not None:
+            await self._session.delete(orm)
+            await self._session.flush()
+
+    async def get_expiring_pantry(self, user_id: int, days: int) -> list[PantryItem]:
+        """Items que vencen en los próximos N días (excluye los ya vencidos)."""
+        now = datetime.utcnow()
+        cutoff = now + timedelta(days=days)
+        result = await self._session.execute(
+            select(PantryItemORM)
+            .where(
+                PantryItemORM.user_id == user_id,
+                PantryItemORM.expires_at.isnot(None),
+                PantryItemORM.expires_at > now,
+                PantryItemORM.expires_at <= cutoff,
+            )
+            .order_by(PantryItemORM.expires_at.asc())
+        )
+        return [pantry_item_to_domain(row) for row in result.scalars()]
+
+    async def get_expired_pantry(self, user_id: int) -> list[PantryItem]:
+        """Items ya vencidos (expires_at <= ahora)."""
+        now = datetime.utcnow()
+        result = await self._session.execute(
+            select(PantryItemORM)
+            .where(
+                PantryItemORM.user_id == user_id,
+                PantryItemORM.expires_at.isnot(None),
+                PantryItemORM.expires_at <= now,
+            )
+            .order_by(PantryItemORM.expires_at.asc())
+        )
+        return [pantry_item_to_domain(row) for row in result.scalars()]
