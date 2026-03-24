@@ -66,32 +66,25 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         minute=0,
         id="daily_expiry_check",
     )
-    # Scraping semanal (lunes 04:00 UTC, solo si SEPA falla consistentemente)
-    scheduler.add_job(
-        _etl_weekly_scraping,
-        "cron",
-        day_of_week="mon",
-        hour=4,
-        minute=0,
-        id="weekly_scraping",
-    )
-
     scheduler.start()
-    logger.info("APScheduler started (backup 03:00 UTC, health cleanup Sunday 02:00 UTC)")
+    logger.info("APScheduler started (backup 03:00 UTC, SEPA 06:00 UTC, expiry 08:00 UTC)")
 
     # ── Telegram Bot ──────────────────────────────────────────────────────────
     bot_app = None
-    try:
-        from app.adapters.telegram.bot import create_telegram_bot
+    if settings.telegram_bot_enabled:
+        try:
+            from app.adapters.telegram.bot import create_telegram_bot
 
-        bot_app = create_telegram_bot()
-        await bot_app.initialize()
-        await bot_app.start()
-        await bot_app.updater.start_polling()
-        logger.info("Telegram bot started (polling)")
-    except Exception as exc:
-        logger.warning("Telegram bot not started: %s", exc)
-        bot_app = None
+            bot_app = create_telegram_bot()
+            await bot_app.initialize()
+            await bot_app.start()
+            await bot_app.updater.start_polling()
+            logger.info("Telegram bot started (polling)")
+        except Exception as exc:
+            logger.warning("Telegram bot not started: %s", exc)
+            bot_app = None
+    else:
+        logger.info("Telegram bot disabled (TELEGRAM_BOT_ENABLED=false)")
 
     yield
 
@@ -241,48 +234,6 @@ async def _etl_check_expiry_and_notify() -> None:
             logger.info("ETL expiry: notificación enviada a chat_id=%s.", chat_id)
         else:
             logger.info("ETL expiry: todo en orden, sin notificaciones.")
-
-
-async def _etl_weekly_scraping() -> None:
-    """ETL semanal: scraping de precios como fallback si SEPA falla consistentemente."""
-    from sqlalchemy import text
-
-    from app.adapters.persistence.ingredient_repo import IngredientRepository
-    from app.adapters.persistence.market_repo import MarketRepository
-    from app.adapters.pricing.scraping_price_adapter import ScrapingPriceAdapter
-    from app.database import get_session
-
-    logger.info("ETL: iniciando scraping semanal de precios...")
-    updated = 0
-
-    async with get_session() as session:
-        result = await session.execute(text("SELECT id FROM user_profiles LIMIT 1"))
-        row = result.fetchone()
-        if row is None:
-            return
-        user_id = row[0]
-
-        market_repo = MarketRepository(session)
-        ing_repo = IngredientRepository(session)
-        all_ingredients = await ing_repo.list_ingredients()
-
-        scraping_adapter = ScrapingPriceAdapter(market_repo)
-        for ing in all_ingredients:
-            scraping_adapter.register_ingredient(ing.id, ing.name)
-
-        # Verificar cuáles ingredientes no tienen precio reciente (últimos 7 días)
-        from datetime import date, timedelta
-        cutoff = date.today() - timedelta(days=7)
-        all_prices = await market_repo.get_all_current_prices()
-        recent_ingredient_ids = {p.ingredient_id for p in all_prices if p.date >= cutoff}
-
-        for ing in all_ingredients:
-            if ing.id not in recent_ingredient_ids:
-                price = await scraping_adapter.get_price(ing.id)
-                if price:
-                    updated += 1
-
-    logger.info("ETL scraping semanal completado: %d precios actualizados.", updated)
 
 
 async def _cleanup_old_health_logs() -> None:

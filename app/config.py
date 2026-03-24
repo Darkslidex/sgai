@@ -27,11 +27,13 @@ class Settings(BaseSettings):
         "https://api.deepseek.com/v1", description="URL base de la API de DeepSeek"
     )
     deepseek_model: str = Field("deepseek-chat", description="Modelo de DeepSeek a usar")
+    deepseek_vision_model: str = Field("deepseek-vl2", description="Modelo de visión para procesar facturas")
 
     # === Telegram Bot ===
-    telegram_bot_token: str = Field(..., description="Token del bot de Telegram")
+    telegram_bot_enabled: bool = Field(True, description="Activar/desactivar el bot de Telegram")
+    telegram_bot_token: str | None = Field(None, description="Token del bot de Telegram")
     telegram_allowed_chat_ids: list[int] = Field(
-        ..., description="Lista de chat IDs autorizados"
+        default_factory=list, description="Lista de chat IDs autorizados"
     )
 
     # === Seguridad ===
@@ -60,8 +62,10 @@ class Settings(BaseSettings):
 
     @field_validator("telegram_allowed_chat_ids", mode="before")
     @classmethod
-    def parse_chat_ids(cls, v: str | list | int) -> list[int]:
+    def parse_chat_ids(cls, v: str | list | int | None) -> list[int]:
         """Parsea TELEGRAM_ALLOWED_CHAT_IDS desde string CSV, int o lista."""
+        if v is None:
+            return []
         if isinstance(v, int):
             return [v]
         if isinstance(v, str):
