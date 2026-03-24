@@ -16,6 +16,7 @@ os.environ.setdefault("TELEGRAM_BOT_TOKEN", "test-token")
 os.environ.setdefault("TELEGRAM_ALLOWED_CHAT_IDS", "123456789")
 os.environ.setdefault("JWT_SECRET_KEY", "test-secret-key-for-testing-only")
 os.environ.setdefault("APP_ENV", "development")
+os.environ.setdefault("ANA_API_KEY", "test-ana-key-for-testing-only")
 
 from app.database import Base, get_db  # noqa: E402
 from app.main import create_app  # noqa: E402

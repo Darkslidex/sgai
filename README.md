@@ -1,6 +1,8 @@
 # SGAI — Sistema de Gestión Alimenticia Inteligente
 
-Sistema personal de planificación nutricional con IA, bot de Telegram y dashboard web. Diseñado para uso single-user con arquitectura hexagonal, deploy en Railway y privacidad total de los datos.
+**Modelo Híbrido (v2):** SGAI es el backend silencioso ("El Chef"). [Ana (OpenClaw)](https://github.com/openclaw) es la interfaz con el usuario ("La Maitre"). SGAI expone una API REST pura; Ana la consume desde el VPS vía Telegram, scraping con Chromium y Google Fit.
+
+Sistema personal de planificación nutricional con IA. Diseñado para uso single-user con arquitectura hexagonal, deploy en VPS RackNerd y privacidad total de los datos.
 
 ## Descripción
 
@@ -12,31 +14,41 @@ SGAI no es una app de dietas convencional. Es una herramienta de gestión de rec
 - **Anti-desperdicio (ADR-008)**: ratio consumo/vencimiento para evitar pérdidas
 - **Mood & Food**: correlaciones entre bienestar y adherencia al plan
 
-## Arquitectura
+## Arquitectura Híbrida
 
 ```
-┌──────────────────────────────────────────────────────────┐
-│                     Interfaces de Usuario                 │
-│   Bot Telegram (python-telegram-bot) │ Dashboard (Streamlit) │
-└────────────────────┬─────────────────────────────────────┘
-                     │ HTTP / session_state
-┌────────────────────▼─────────────────────────────────────┐
-│                    FastAPI (app/)                          │
-│   /api/v1/ · /health · Middleware · APScheduler           │
-└────────────────────┬─────────────────────────────────────┘
-                     │ Ports (ABC)
-┌────────────────────▼─────────────────────────────────────┐
-│                  Dominio (Hexagonal)                       │
-│  PlanningService · PriceService · HealthService            │
-│  PantryService · ConsumptionRatioService · MoodFoodService │
-└────────────────────┬─────────────────────────────────────┘
-                     │ Adapters
-┌────────────────────▼─────────────────────────────────────┐
-│              Adapters de Infraestructura                   │
-│  PostgreSQL (SQLAlchemy async) │ DeepSeek API              │
-│  SEPA API │ Scraping (httpx)   │ Fernet (cifrado)          │
-└──────────────────────────────────────────────────────────┘
+  Usuario (Telegram)
+        │
+        ▼
+  Ana (OpenClaw — VPS RackNerd)
+  ├─ Interpreta lenguaje natural
+  ├─ Scraping con Chromium (Coto/Jumbo/Carrefour)
+  ├─ Lee tickets con DeepSeek Vision
+  └─ Consulta Google Fit REST API
+        │  HTTP + X-Ana-Key
+        ▼
+  SGAI FastAPI (VPS RackNerd — red interna)
+  ├─ /api/v1/webhooks/ana/*  ← Ana llama a SGAI
+  ├─ /api/v1/market/         ← Precios, pantry, historial
+  ├─ /api/v1/health/         ← Logs, TDEE dinámico
+  ├─ /api/v1/planning/       ← Planes semanales batch cooking
+  └─ APScheduler → alerta a Ana (circuit breaker → Telegram fallback)
+        │
+        ▼
+  PostgreSQL (pg_trgm habilitado)
 ```
+
+### Flujos principales
+
+| Flujo | Descripción |
+|-------|-------------|
+| Usuario → Ana → SGAI | Ana traduce lenguaje natural a llamadas REST |
+| SGAI → Ana → Web → SGAI | Cronjob 06:00 delega scraping de precios a Ana |
+| SGAI → Ana → Usuario | Cronjob 08:00 alerta vencimientos (fallback: Telegram directo) |
+
+### Telegram Bot
+
+El bot de Telegram de SGAI se puede desactivar con `TELEGRAM_BOT_ENABLED=false` para correr SGAI como API pura (Ana toma el rol de interfaz).
 
 ## Requisitos
 
