@@ -14,7 +14,11 @@ depends_on = None
 
 
 def upgrade() -> None:
-    op.execute("CREATE EXTENSION IF NOT EXISTS pg_trgm")
+    try:
+        op.execute("CREATE EXTENSION IF NOT EXISTS pg_trgm")
+    except Exception:
+        # Sin privilegios de superusuario — el sistema usa ILIKE como fallback
+        pass
 
 
 def downgrade() -> None:
