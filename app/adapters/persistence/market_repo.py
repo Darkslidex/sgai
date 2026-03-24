@@ -84,6 +84,19 @@ class MarketRepository(MarketRepositoryPort):
         )
         return [pantry_item_to_domain(row) for row in result.scalars()]
 
+    async def get_prices_last_n_days(self, ingredient_id: int, days: int = 7) -> list[MarketPrice]:
+        """Precios del ingrediente en los últimos N días, ordenados por precio ASC."""
+        cutoff = date.today() - timedelta(days=days)
+        result = await self._session.execute(
+            select(MarketPriceORM)
+            .where(
+                MarketPriceORM.ingredient_id == ingredient_id,
+                MarketPriceORM.date >= cutoff,
+            )
+            .order_by(MarketPriceORM.price_ars.asc())
+        )
+        return [market_price_to_domain(row) for row in result.scalars()]
+
     async def get_prices_by_source(
         self, ingredient_id: int, source: str, days: int = 30
     ) -> list[MarketPrice]:

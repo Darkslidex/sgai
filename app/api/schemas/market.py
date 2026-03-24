@@ -28,6 +28,34 @@ class MarketPriceResponse(BaseModel):
     created_at: datetime
 
 
+class StorePrice(BaseModel):
+    store: str | None
+    price_ars: float
+    date: date
+    source: str
+
+
+class CheapestPriceResponse(BaseModel):
+    ingredient_name: str
+    ingredient_id: int
+    cheapest_price_ars: float
+    cheapest_store: str | None
+    cheapest_date: date
+    store_comparison: list[StorePrice]
+    days_analyzed: int
+
+
+class PriceHistoryStats(BaseModel):
+    ingredient_name: str
+    ingredient_id: int
+    days_analyzed: int
+    total_records: int
+    avg_ars: float | None
+    min_ars: float | None
+    max_ars: float | None
+    history: list[MarketPriceResponse]
+
+
 class PantryItemCreate(BaseModel):
     user_id: int
     ingredient_id: int
