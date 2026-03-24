@@ -36,6 +36,9 @@ class Settings(BaseSettings):
         default_factory=list, description="Lista de chat IDs autorizados"
     )
 
+    # === Integración Ana (OpenClaw) ===
+    ana_api_key: str | None = Field(None, description="API key que Ana usa para llamar a SGAI")
+
     # === Seguridad ===
     jwt_secret_key: str = Field(..., description="Clave secreta para firmar JWTs")
     jwt_algorithm: str = Field("HS256", description="Algoritmo JWT")
