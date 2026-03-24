@@ -38,6 +38,8 @@ class Settings(BaseSettings):
 
     # === Integración Ana (OpenClaw) ===
     ana_api_key: str | None = Field(None, description="API key que Ana usa para llamar a SGAI")
+    openclaw_webhook_url: str | None = Field(None, description="URL del gateway de Ana para alertas salientes")
+    sgai_outbound_key: str | None = Field(None, description="Clave que SGAI incluye al llamar a Ana (X-SGAI-Key)")
 
     # === Seguridad ===
     jwt_secret_key: str = Field(..., description="Clave secreta para firmar JWTs")

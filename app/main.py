@@ -106,10 +106,18 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
 
 async def _send_telegram_notification(chat_id: str, text: str) -> None:
-    """Envía una notificación vía Telegram Bot API usando httpx."""
+    """Envía una notificación vía Telegram Bot API usando httpx.
+
+    Mantenida como canal de emergencia directo.
+    Para alertas proactivas usar alert_dispatcher.dispatch_alert() que implementa
+    el circuit breaker Ana → Telegram.
+    """
     import httpx
 
     settings = get_settings()
+    if not settings.telegram_bot_token:
+        logger.warning("TELEGRAM_BOT_TOKEN no configurado — omitiendo notificación a %s.", chat_id)
+        return
     try:
         async with httpx.AsyncClient(timeout=10) as client:
             await client.post(
@@ -121,22 +129,21 @@ async def _send_telegram_notification(chat_id: str, text: str) -> None:
 
 
 async def _etl_update_sepa_prices() -> None:
-    """ETL diario: actualiza precios SEPA para ingredientes del plan activo."""
+    """ETL diario: actualiza precios SEPA y delega scraping a Ana para lo que no cubre SEPA."""
     from sqlalchemy import text
 
+    from app.adapters.notifications.alert_dispatcher import dispatch_task_to_ana
     from app.adapters.persistence.ingredient_repo import IngredientRepository
     from app.adapters.persistence.market_repo import MarketRepository
     from app.adapters.persistence.planning_repo import PlanningRepository
-    from app.adapters.persistence.user_repo import UserRepository
     from app.adapters.pricing.sepa_price_adapter import SEPAPriceAdapter
     from app.database import get_session
 
     logger.info("ETL: iniciando actualización de precios SEPA...")
-    updated = 0
+    updated_by_sepa = 0
+    needs_scraping: list[str] = []
 
     async with get_session() as session:
-        user_repo = UserRepository(session)
-        # Sistema single-user: obtener el primer usuario activo
         result = await session.execute(text("SELECT id FROM user_profiles LIMIT 1"))
         row = result.fetchone()
         if row is None:
@@ -157,7 +164,6 @@ async def _etl_update_sepa_prices() -> None:
 
         sepa_adapter = SEPAPriceAdapter(market_repo, ingredient_names)
 
-        # Actualizar solo ingredientes del plan activo
         items = active_plan.shopping_list_json.get("items", [])
         for item in items:
             name = item.get("ingredient_name", "")
@@ -165,15 +171,39 @@ async def _etl_update_sepa_prices() -> None:
             if matches:
                 price = await sepa_adapter.get_price(matches[0].id)
                 if price:
-                    updated += 1
+                    updated_by_sepa += 1
+                else:
+                    # SEPA no cubrió este ingrediente → Ana lo buscará en supermercados
+                    needs_scraping.append(name)
 
-    logger.info("ETL SEPA completado: %d precios actualizados.", updated)
+    logger.info("ETL SEPA completado: %d precios actualizados.", updated_by_sepa)
+
+    # Notificar a Ana los ingredientes que SEPA no cubrió para que haga scraping
+    if needs_scraping:
+        sent = await dispatch_task_to_ana(
+            task_type="price_request",
+            data={"ingredients": needs_scraping},
+            instructions=(
+                f"SGAI necesita precios actualizados para estos ingredientes que no están en SEPA: "
+                f"{', '.join(needs_scraping)}. "
+                "Buscá cada uno en Coto, Jumbo y Carrefour online. "
+                "Enviá los precios encontrados a POST /api/v1/webhooks/ana/receipt "
+                "con store_name=nombre_supermercado."
+            ),
+        )
+        if sent:
+            logger.info("ETL: %d ingrediente(s) delegados a Ana para scraping.", len(needs_scraping))
+        else:
+            logger.warning("ETL: Ana no disponible, %d ingrediente(s) sin precio de scraping.", len(needs_scraping))
 
 
 async def _etl_check_expiry_and_notify() -> None:
-    """ETL diario: verifica vencimientos de pantry y calcula waste risk. Notifica vía Telegram."""
+    """ETL diario: verifica vencimientos y waste risk. Notifica a Ana (fallback: Telegram directo)."""
+    from datetime import datetime
+
     from sqlalchemy import text
 
+    from app.adapters.notifications.alert_dispatcher import dispatch_alert
     from app.adapters.persistence.ingredient_repo import IngredientRepository
     from app.adapters.persistence.market_repo import MarketRepository
     from app.adapters.persistence.planning_repo import PlanningRepository
@@ -182,7 +212,6 @@ async def _etl_check_expiry_and_notify() -> None:
     from app.domain.services.pantry_service import PantryService
 
     logger.info("ETL: verificando vencimientos y riesgo de desperdicio...")
-    settings = get_settings()
 
     async with get_session() as session:
         result = await session.execute(
@@ -205,35 +234,69 @@ async def _etl_check_expiry_and_notify() -> None:
         waste_report = await consumption_service.get_waste_risk_report(user_id)
         at_risk = [w for w in waste_report if w.action == "will_waste"]
 
-        lines: list[str] = []
+        if not expired and not expiring and not at_risk:
+            logger.info("ETL expiry: todo en orden, sin notificaciones.")
+            return
+
+        # ── Construir payload estructurado para Ana ───────────────────────────
+        alert_data: dict = {
+            "expired": [
+                {"ingredient_id": i.ingredient_id, "quantity": i.quantity_amount, "unit": i.unit}
+                for i in expired
+            ],
+            "expiring_soon": [],
+            "waste_risk": [],
+        }
+
+        telegram_lines: list[str] = []
 
         if expired:
-            lines.append(f"🚨 *{len(expired)} item(s) vencidos* en tu alacena — descartálos.")
+            telegram_lines.append(f"🚨 *{len(expired)} item(s) vencidos* en tu alacena — descartálos.")
 
         if expiring:
-            lines.append(f"⚠️ *{len(expiring)} item(s) próximos a vencer* (próximos 3 días):")
+            telegram_lines.append(f"⚠️ *{len(expiring)} item(s) próximos a vencer* (próximos 3 días):")
             for item in expiring[:5]:
-                days_left = ""
+                days_left = 0
                 if item.expires_at:
-                    from datetime import datetime
                     delta = item.expires_at - datetime.utcnow()
-                    days_left = f" ({max(0, delta.days)} días)"
-                lines.append(f"  • Ingrediente #{item.ingredient_id}: {item.quantity_amount} {item.unit}{days_left}")
+                    days_left = max(0, delta.days)
+                alert_data["expiring_soon"].append({
+                    "ingredient_id": item.ingredient_id,
+                    "quantity": item.quantity_amount,
+                    "unit": item.unit,
+                    "days_left": days_left,
+                })
+                telegram_lines.append(
+                    f"  • Ingrediente #{item.ingredient_id}: {item.quantity_amount} {item.unit}"
+                    + (f" ({days_left} días)" if days_left else "")
+                )
 
         if at_risk:
-            lines.append(f"\n⚠️ *{len(at_risk)} item(s) en riesgo de desperdicio* (consumo insuficiente):")
+            telegram_lines.append(f"\n⚠️ *{len(at_risk)} item(s) en riesgo de desperdicio*:")
             for w in at_risk[:3]:
-                lines.append(
+                alert_data["waste_risk"].append({
+                    "ingredient_id": w.pantry_item.ingredient_id,
+                    "days_to_consume": round(w.days_to_consume),
+                    "days_remaining": w.days_remaining,
+                })
+                telegram_lines.append(
                     f"  • Ingrediente #{w.pantry_item.ingredient_id}: "
                     f"{w.days_to_consume:.0f} días para consumir, "
                     f"{w.days_remaining} días restantes"
                 )
 
-        if lines:
-            await _send_telegram_notification(chat_id, "\n".join(lines))
-            logger.info("ETL expiry: notificación enviada a chat_id=%s.", chat_id)
-        else:
-            logger.info("ETL expiry: todo en orden, sin notificaciones.")
+        channel = await dispatch_alert(
+            alert_type="expiry_alert",
+            data=alert_data,
+            instructions=(
+                "SGAI detectó problemas en la alacena del usuario. "
+                "Analizá los datos, sugerí recetas para usar los ingredientes próximos a vencer "
+                "y avisale al usuario de forma empática y concisa por Telegram."
+            ),
+            fallback_chat_id=str(chat_id) if chat_id else None,
+            fallback_message="\n".join(telegram_lines),
+        )
+        logger.info("ETL expiry: alerta enviada por canal='%s' a chat_id=%s.", channel, chat_id)
 
 
 async def _cleanup_old_health_logs() -> None:
