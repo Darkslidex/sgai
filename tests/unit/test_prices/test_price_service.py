@@ -1,4 +1,4 @@
-"""Tests del servicio de precios híbrido (3 niveles) y circuit breaker."""
+"""Tests del servicio de precios híbrido (2 niveles) y degradación graceful."""
 
 import pytest
 from datetime import date, datetime, timedelta
@@ -6,7 +6,6 @@ from unittest.mock import AsyncMock, MagicMock
 
 from app.domain.models.market import MarketPrice
 from app.domain.services.price_service import PriceService
-from app.adapters.pricing.scraping_price_adapter import ScrapingPriceAdapter
 
 
 def _make_price(ingredient_id=1, price_ars=1000.0, source="manual", days_ago=0, confidence=1.0):
@@ -48,19 +47,10 @@ def mock_sepa_adapter():
 
 
 @pytest.fixture
-def mock_scraping_adapter():
-    adapter = MagicMock()
-    adapter.get_price = AsyncMock(return_value=None)
-    adapter.save_price = AsyncMock()
-    return adapter
-
-
-@pytest.fixture
-def price_service(mock_manual_adapter, mock_sepa_adapter, mock_scraping_adapter, mock_market_repo):
+def price_service(mock_manual_adapter, mock_sepa_adapter, mock_market_repo):
     return PriceService(
         manual_adapter=mock_manual_adapter,
         sepa_adapter=mock_sepa_adapter,
-        scraping_adapter=mock_scraping_adapter,
         market_repo=mock_market_repo,
     )
 
@@ -68,8 +58,8 @@ def price_service(mock_manual_adapter, mock_sepa_adapter, mock_scraping_adapter,
 # ── Tests de prioridad ────────────────────────────────────────────────────────
 
 @pytest.mark.asyncio
-async def test_manual_price_has_highest_priority(price_service, mock_manual_adapter, mock_sepa_adapter, mock_scraping_adapter):
-    """Precio manual (reciente) debe retornarse sin consultar SEPA ni scraping."""
+async def test_manual_price_has_highest_priority(price_service, mock_manual_adapter, mock_sepa_adapter):
+    """Precio manual (reciente) debe retornarse sin consultar SEPA."""
     manual_price = _make_price(source="manual", price_ars=1500.0)
     mock_manual_adapter.get_price.return_value = manual_price
 
@@ -77,12 +67,23 @@ async def test_manual_price_has_highest_priority(price_service, mock_manual_adap
 
     assert result is manual_price
     mock_sepa_adapter.get_price.assert_not_called()
-    mock_scraping_adapter.get_price.assert_not_called()
 
 
 @pytest.mark.asyncio
-async def test_sepa_used_when_no_manual_price(price_service, mock_manual_adapter, mock_sepa_adapter, mock_scraping_adapter):
-    """Si no hay precio manual reciente, debe usarse SEPA."""
+async def test_factura_price_has_highest_priority(price_service, mock_manual_adapter, mock_sepa_adapter):
+    """Precio de factura (reciente) debe retornarse sin consultar SEPA."""
+    factura_price = _make_price(source="factura", price_ars=1450.0)
+    mock_manual_adapter.get_price.return_value = factura_price
+
+    result = await price_service.get_best_price(ingredient_id=1)
+
+    assert result is factura_price
+    mock_sepa_adapter.get_price.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_sepa_used_when_no_manual_price(price_service, mock_manual_adapter, mock_sepa_adapter):
+    """Si no hay precio manual/factura reciente, debe usarse SEPA."""
     sepa_price = _make_price(source="sepa", price_ars=1200.0, confidence=0.8)
     mock_manual_adapter.get_price.return_value = None
     mock_sepa_adapter.get_price.return_value = sepa_price
@@ -90,29 +91,14 @@ async def test_sepa_used_when_no_manual_price(price_service, mock_manual_adapter
     result = await price_service.get_best_price(ingredient_id=1)
 
     assert result is sepa_price
-    mock_scraping_adapter.get_price.assert_not_called()
 
 
 @pytest.mark.asyncio
-async def test_scraping_used_when_sepa_unavailable(price_service, mock_manual_adapter, mock_sepa_adapter, mock_scraping_adapter):
-    """Si SEPA no responde, debe usarse scraping."""
-    scraping_price = _make_price(source="scraping", price_ars=1100.0, confidence=0.6)
-    mock_manual_adapter.get_price.return_value = None
-    mock_sepa_adapter.get_price.return_value = None
-    mock_scraping_adapter.get_price.return_value = scraping_price
-
-    result = await price_service.get_best_price(ingredient_id=1)
-
-    assert result is scraping_price
-
-
-@pytest.mark.asyncio
-async def test_fallback_to_last_known_price(price_service, mock_manual_adapter, mock_sepa_adapter, mock_scraping_adapter, mock_market_repo):
+async def test_fallback_to_last_known_price(price_service, mock_manual_adapter, mock_sepa_adapter, mock_market_repo):
     """Si ninguna fuente responde, retorna el último precio conocido en DB."""
     last_price = _make_price(source="manual", price_ars=900.0, days_ago=15)
     mock_manual_adapter.get_price.return_value = None
     mock_sepa_adapter.get_price.return_value = None
-    mock_scraping_adapter.get_price.return_value = None
     mock_market_repo.get_current_price.return_value = last_price
 
     result = await price_service.get_best_price(ingredient_id=1)
@@ -181,63 +167,23 @@ async def test_sepa_http_error_returns_none_gracefully(mock_market_repo):
     assert result is None
 
 
-# ── Tests del circuit breaker de scraping ────────────────────────────────────
+# ── Tests get_best_prices_by_store ────────────────────────────────────────────
 
 @pytest.mark.asyncio
-async def test_circuit_breaker_opens_after_max_failures(mock_market_repo):
-    """Después de MAX_FAILURES fallos, el circuit breaker se activa."""
-    adapter = ScrapingPriceAdapter(mock_market_repo)
-    adapter.register_ingredient(1, "pollo")
+async def test_get_best_prices_by_store_returns_lowest_per_store(price_service, mock_market_repo):
+    """get_best_prices_by_store retorna el precio más bajo por tienda."""
+    history = [
+        _make_price(price_ars=1500.0, source="factura"),
+        _make_price(price_ars=1200.0, source="factura"),  # más bajo → debe quedar
+    ]
+    history[0].store = "Coto"
+    history[1].store = "Coto"
+    mock_market_repo.get_price_history = AsyncMock(return_value=history)
 
-    assert adapter._is_circuit_open() is False
+    result = await price_service.get_best_prices_by_store([1], days=30)
 
-    for _ in range(adapter.MAX_FAILURES):
-        adapter._record_failure()
-
-    assert adapter._is_circuit_open() is True
-
-
-@pytest.mark.asyncio
-async def test_circuit_breaker_open_returns_none(mock_market_repo):
-    """Con el circuit abierto, get_price retorna None sin intentar scraping."""
-    adapter = ScrapingPriceAdapter(mock_market_repo)
-    adapter.register_ingredient(1, "pollo")
-
-    # Activar circuit breaker manualmente
-    for _ in range(adapter.MAX_FAILURES):
-        adapter._record_failure()
-
-    result = await adapter.get_price(1)
-    assert result is None
-
-
-@pytest.mark.asyncio
-async def test_circuit_breaker_resets_after_cooldown(mock_market_repo):
-    """Después del período de cooldown, el circuit breaker se resetea."""
-    from datetime import datetime, timedelta
-
-    adapter = ScrapingPriceAdapter(mock_market_repo)
-
-    # Activar circuit breaker con fecha ya expirada
-    for _ in range(adapter.MAX_FAILURES):
-        adapter._record_failure()
-
-    # Simular que el cooldown ya pasó
-    adapter.circuit_open_until = datetime.now() - timedelta(seconds=1)
-
-    assert adapter._is_circuit_open() is False
-    assert adapter.failure_count == 0
-
-
-@pytest.mark.asyncio
-async def test_circuit_success_resets_failure_count(mock_market_repo):
-    """Un éxito resetea el contador de fallos."""
-    adapter = ScrapingPriceAdapter(mock_market_repo)
-
-    adapter.failure_count = 2
-    adapter._record_success()
-
-    assert adapter.failure_count == 0
+    assert "Coto" in result
+    assert result["Coto"][1] == 1200.0
 
 
 # ── Tests de detección de anomalías ──────────────────────────────────────────

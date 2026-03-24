@@ -1,3 +1,9 @@
+---
+name: sgai
+description: "Sistema de Gestión Alimenticia Inteligente. Usar cuando Felix habla de comida, precios, supermercado, alacena, calorías, sueño, pasos, o salud. Consulta y actualiza el backend SGAI (El Chef) a través de su API REST."
+metadata: { "openclaw": { "emoji": "🍳" } }
+---
+
 # Skill: SGAI — Sistema de Gestión Alimenticia Inteligente
 
 ## Descripción
@@ -151,7 +157,7 @@ SGAI te envía alertas vía POST con este formato:
   "instructions": "texto explicando qué hacer"
 }
 ```
-Validá el header `X-SGAI-Key` con el valor de `SGAI_OUTBOUND_KEY`.
+SGAI incluye el header `Authorization: Bearer <SGAI_OUTBOUND_KEY>` en cada llamada.
 
 Para `expiry_alert`: leé `data.expired`, `data.expiring_soon`, `data.waste_risk`.
 Sugerí recetas para usar los ingredientes próximos a vencer. Sé empático y conciso.

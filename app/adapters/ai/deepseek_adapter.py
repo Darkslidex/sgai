@@ -193,3 +193,59 @@ class DeepSeekAdapter(AIPlannerPort):
                 if attempt < _MAX_RETRIES - 1:
                     await asyncio.sleep(2 ** attempt)
         raise RuntimeError(f"DeepSeek generate_text failed: {last_exc}") from last_exc
+
+    async def analyze_invoice(
+        self, photo_b64: str, prompt: str, vision_model: str = "deepseek-vl2"
+    ) -> dict:
+        """Analiza una foto de factura usando el modelo de visión de DeepSeek.
+
+        Envía la imagen en base64 siguiendo el formato OpenAI-compatible de visión.
+        Retorna el JSON parseado con store, date e items.
+        """
+        import json
+
+        messages = [
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": f"data:image/jpeg;base64,{photo_b64}"},
+                    },
+                    {"type": "text", "text": prompt},
+                ],
+            }
+        ]
+        headers = {
+            "Authorization": f"Bearer {self._api_key}",
+            "Content-Type": "application/json",
+        }
+        payload = {
+            "model": vision_model,
+            "messages": messages,
+            "temperature": _TEMPERATURE,
+            "response_format": {"type": "json_object"},
+        }
+
+        last_exc: Exception = RuntimeError("No attempt made")
+        for attempt in range(_MAX_RETRIES):
+            try:
+                async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
+                    response = await client.post(
+                        f"{self._base_url}/chat/completions",
+                        headers=headers,
+                        json=payload,
+                    )
+                    response.raise_for_status()
+                    data = response.json()
+                    content = data["choices"][0]["message"]["content"]
+                    logger.info("DeepSeek analyze_invoice OK")
+                    return json.loads(content)
+            except (httpx.TimeoutException, httpx.HTTPStatusError, KeyError) as exc:
+                last_exc = exc
+                if attempt < _MAX_RETRIES - 1:
+                    await asyncio.sleep(2 ** attempt)
+            except json.JSONDecodeError as exc:
+                raise ValueError(f"DeepSeek retornó JSON inválido en factura: {exc}") from exc
+
+        raise RuntimeError(f"DeepSeek analyze_invoice failed: {last_exc}") from last_exc

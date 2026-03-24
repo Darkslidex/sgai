@@ -55,7 +55,7 @@ async def dispatch_alert(
                 response = await client.post(
                     settings.openclaw_webhook_url,
                     json=payload,
-                    headers={"X-SGAI-Key": settings.sgai_outbound_key},
+                    headers={"Authorization": f"Bearer {settings.sgai_outbound_key}"},
                 )
             if response.is_success:
                 logger.info("Alerta '%s' enviada a Ana (HTTP %d).", alert_type, response.status_code)
@@ -108,7 +108,7 @@ async def dispatch_task_to_ana(
             response = await client.post(
                 settings.openclaw_webhook_url,
                 json=payload,
-                headers={"X-SGAI-Key": settings.sgai_outbound_key},
+                headers={"Authorization": f"Bearer {settings.sgai_outbound_key}"},
             )
         if response.is_success:
             logger.info("Tarea '%s' enviada a Ana (HTTP %d).", task_type, response.status_code)

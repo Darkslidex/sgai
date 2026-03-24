@@ -7,7 +7,7 @@ import logging
 from datetime import date, datetime
 
 from telegram import Update
-from telegram.ext import Application, CommandHandler, ContextTypes
+from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters
 
 from app.adapters.ai.deepseek_adapter import DeepSeekAdapter
 from app.adapters.persistence.health_repo import HealthRepository
@@ -27,6 +27,7 @@ from app.domain.models.pantry_item import PantryItem
 from app.domain.services.consumption_ratio_service import ConsumptionRatioService
 from app.domain.services.energy_mode_service import EnergyModeService, EnergyState
 from app.domain.services.health_service import HealthService
+from app.domain.services.invoice_service import InvoiceService
 from app.domain.services.mood_food_service import MoodFoodService
 from app.domain.services.pantry_service import PantryService
 from app.domain.services.planning_service import PlanningService
@@ -1054,6 +1055,83 @@ async def cmd_reporte(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     await log_interaction(int(chat_id), "/reporte", True)
 
 
+# ──────────────────────────────────────── /factura ──────
+
+@authorized_only
+async def cmd_factura(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Informa al usuario cómo enviar una factura."""
+    await update.message.reply_text(
+        "🧾 *Procesamiento de Facturas*\n\n"
+        "Enviá una foto del ticket o factura del supermercado.\n"
+        "El sistema extraerá automáticamente los precios y los guardará.\n\n"
+        "📌 Funciona mejor con tickets de:\n"
+        "Coto · Carrefour · Jumbo · Disco · Día · La Anónima",
+        parse_mode="Markdown",
+    )
+
+
+async def handle_invoice_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Procesa una foto enviada por el usuario como factura de supermercado."""
+    from app.config import get_settings
+
+    settings = get_settings()
+
+    # Verificar que sea un usuario autorizado
+    chat_id = str(update.effective_chat.id)
+    if int(chat_id) not in settings.telegram_allowed_chat_ids:
+        return
+
+    await update.message.reply_text("🔍 Analizando la factura, aguardá...")
+
+    try:
+        # Descargar la foto en máxima resolución
+        photo = update.message.photo[-1]
+        file = await context.bot.get_file(photo.file_id)
+        photo_bytes = await file.download_as_bytearray()
+
+        async with get_session() as session:
+            market_repo = MarketRepository(session)
+            ing_repo = IngredientRepository(session)
+            llm = DeepSeekAdapter(
+                api_key=settings.deepseek_api_key,
+                base_url=settings.deepseek_base_url,
+                model=settings.deepseek_model,
+            )
+            invoice_svc = InvoiceService(llm, market_repo, ing_repo)
+            result = await invoice_svc.process_invoice(
+                bytes(photo_bytes),
+                vision_model=settings.deepseek_vision_model,
+            )
+
+        # Armar respuesta
+        lines = [f"🧾 *Factura procesada — {result.store}*"]
+        if result.date:
+            lines.append(f"📅 Fecha: {result.date}")
+        lines.append("")
+
+        if result.matched_items:
+            lines.append(f"✅ *{result.total_saved} precios guardados:*")
+            for item in result.matched_items:
+                lines.append(f"  • {item.ingredient_name}: ${item.price_ars:,.0f}".replace(",", "."))
+        else:
+            lines.append("⚠️ No se reconocieron ingredientes del catálogo.")
+
+        if result.unmatched_names:
+            lines.append(f"\n❓ *No identificados ({len(result.unmatched_names)}):*")
+            lines.append(", ".join(result.unmatched_names[:8]))
+
+        await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+        await log_interaction(int(chat_id), "factura_photo", True)
+
+    except Exception as exc:
+        logger.exception("Error procesando factura: %s", exc)
+        await update.message.reply_text(
+            "❌ No pude procesar la factura. "
+            "Asegurate de que la foto sea clara y que el ticket sea legible.\n"
+            "También podés usar /precio para ingresar precios manualmente."
+        )
+
+
 # ──────────────────────────────────────── Factory ──────
 
 def create_telegram_bot() -> Application:
@@ -1091,6 +1169,9 @@ def create_telegram_bot() -> Application:
     # Fase 4B — Mood & Food
     application.add_handler(CommandHandler("mood", cmd_mood))
     application.add_handler(CommandHandler("reporte", cmd_reporte))
+    # Fase 4C — Facturas
+    application.add_handler(CommandHandler("factura", cmd_factura))
+    application.add_handler(MessageHandler(filters.PHOTO, handle_invoice_photo))
 
     logger.info("Telegram bot configured with %d handlers", len(application.handlers))
     return application
