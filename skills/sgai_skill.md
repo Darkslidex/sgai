@@ -166,7 +166,35 @@ Sugerí recetas para usar los ingredientes próximos a vencer. Sé empático y c
 
 ---
 
-### 9. Sync manual de Google Fit
+### 9. Registrar lo que comió Felix
+**Cuándo usar:** Felix dice lo que comió, en cualquier formato — texto detallado, mensaje de voz transcripto, o descripción de una foto.
+
+```
+POST /api/v1/webhooks/ana/meal-log
+Header: X-Ana-Key: <key>
+Body:
+{
+  "user_id": 1,
+  "date": "YYYY-MM-DD",
+  "description": "almorcé 150g arroz, 200g pechuga a la plancha",  // texto libre
+  "meal_type": "almuerzo",  // opcional — si no se pone, el LLM lo infiere
+  "source": "text"          // "text", "photo" o "voice"
+}
+```
+Respuesta incluye ítems parseados con calorías y proteínas por ingrediente.
+Después de registrar, siempre mostrá el resumen: total calorías + cuántas quedan para el día.
+
+### 9b. Ver resumen calórico del día
+**Cuándo usar:** Felix pregunta cuánto comió hoy, cuántas calorías le quedan, o quiere ver su consumo diario.
+
+```
+GET /api/v1/meal-logs/daily/1?date=YYYY-MM-DD
+```
+Respuesta incluye todas las comidas del día, total calorías, total proteína, TDEE y `calories_remaining`.
+
+---
+
+### 10. Sync manual de Google Fit
 **Cuándo usar:** Felix dice "sincronizá mis pasos", "actualizá mis datos de salud", o antes de consultar el TDEE si los datos del día parecen desactualizados.
 
 ```
