@@ -15,14 +15,17 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.adapters.ai.deepseek_adapter import DeepSeekAdapter
 from app.adapters.persistence.health_repo import HealthRepository
 from app.adapters.persistence.ingredient_repo import IngredientRepository
 from app.adapters.persistence.market_repo import MarketRepository
 from app.adapters.persistence.user_repo import UserRepository
 from app.api.dependencies.auth import verify_ana_api_key
+from app.config import get_settings
 from app.database import get_db
 from app.domain.models.health import HealthLog
 from app.domain.services.health_service import HealthService
+from app.domain.services.meal_log_service import MealLogService
 from app.domain.services.receipt_service import ReceiptService
 
 router = APIRouter(
@@ -346,4 +349,110 @@ async def receive_biometrics(
         sleep_score=sleep_score,
         tdee_kcal=tdee_kcal,
         message=message,
+    )
+
+
+# ── Meal Log ──────────────────────────────────────────────────────────────────
+
+
+class MealLogFromAna(BaseModel):
+    """Registro de comida enviado por Ana desde lenguaje natural."""
+
+    user_id: int
+    date: str = Field(..., description="Fecha en formato YYYY-MM-DD")
+    description: str = Field(..., min_length=3, description="Texto libre de lo que comió Felix")
+    meal_type: str | None = Field(
+        None,
+        description="'desayuno', 'almuerzo', 'cena' o 'snack'. Si es None el LLM lo infiere.",
+    )
+    source: str = Field("text", description="'text', 'photo' o 'voice'")
+
+
+class MealItemResult(BaseModel):
+    ingredient: str
+    quantity_g: float
+    calories_kcal: float
+    protein_g: float | None = None
+
+
+class MealLogResult(BaseModel):
+    ok: bool
+    meal_log_id: int
+    meal_type: str
+    items: list[MealItemResult]
+    total_calories_kcal: float
+    total_protein_g: float | None
+    message: str
+
+
+@router.post(
+    "/meal-log",
+    response_model=MealLogResult,
+    status_code=status.HTTP_201_CREATED,
+    summary="Ana envía una comida consumida para registrar",
+)
+async def receive_meal_log(
+    body: MealLogFromAna,
+    db: AsyncSession = Depends(get_db),
+) -> MealLogResult:
+    """Registra una comida consumida, parseada por el LLM desde texto libre.
+
+    El LLM (DeepSeek) descompone la descripción en ítems con calorías y proteínas.
+    Si meal_type no se provee, el LLM lo infiere del contexto de la descripción.
+    """
+    from datetime import date as _date
+
+    try:
+        target_date = _date.fromisoformat(body.date)
+    except ValueError:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"Formato de fecha inválido: '{body.date}'. Usar YYYY-MM-DD.",
+        )
+
+    settings = get_settings()
+    llm = DeepSeekAdapter(
+        api_key=settings.deepseek_api_key,
+        base_url=settings.deepseek_base_url,
+        model=settings.deepseek_model,
+    )
+
+    service = MealLogService(session=db, llm_port=llm)
+
+    try:
+        meal_log = await service.log_meal(
+            user_id=body.user_id,
+            target_date=target_date,
+            description=body.description,
+            meal_type=body.meal_type,
+            source=body.source,
+        )
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=str(exc),
+        )
+
+    items_result = [
+        MealItemResult(
+            ingredient=item.ingredient,
+            quantity_g=item.quantity_g,
+            calories_kcal=item.calories_kcal,
+            protein_g=item.protein_g,
+        )
+        for item in meal_log.items
+    ]
+
+    return MealLogResult(
+        ok=True,
+        meal_log_id=meal_log.id,
+        meal_type=meal_log.meal_type,
+        items=items_result,
+        total_calories_kcal=meal_log.total_calories_kcal,
+        total_protein_g=meal_log.total_protein_g,
+        message=(
+            f"Comida registrada: {meal_log.meal_type} del {meal_log.date} — "
+            f"{meal_log.total_calories_kcal:.0f} kcal, "
+            f"{len(meal_log.items)} ítem(s)."
+        ),
     )

@@ -37,6 +37,21 @@ _TIMEOUT = 60.0
 
 # ── Pydantic schemas para validar respuesta del LLM ──────────────────────────
 
+_MEAL_PARSE_TEMPERATURE = 0.1
+
+
+class _MealItemSchema(BaseModel):
+    ingredient: str
+    quantity_g: float
+    calories_kcal: float
+    protein_g: float | None = None
+
+
+class _MealParseSchema(BaseModel):
+    items: list[_MealItemSchema]
+    meal_type_guess: str
+
+
 class _DayMealsSchema(BaseModel):
     day: str
     lunch: str
@@ -150,6 +165,130 @@ class DeepSeekAdapter(AIPlannerPort):
             prep_steps=parsed.prep_steps,
             tokens_used=tokens,
         )
+
+    async def parse_meal_description(
+        self,
+        description: str,
+        ingredient_catalog: list[str],
+    ) -> dict:
+        """Parsea una descripción de comida en texto libre y retorna ítems estructurados.
+
+        Usa temperatura 0.1 para máxima determinismo. Retorna JSON validado con Pydantic.
+        Si las cantidades no están especificadas estima porciones razonables.
+        Usa el catálogo de ingredientes para mejorar la precisión de calorías y proteínas.
+        """
+        catalog_excerpt = ", ".join(ingredient_catalog[:80]) if ingredient_catalog else "ninguno"
+
+        system_prompt = (
+            "Sos un nutricionista experto en la dieta argentina. "
+            "Tu tarea es parsear descripciones de comidas en texto libre y devolver JSON estructurado. "
+            "Siempre respondé SOLO con JSON válido, sin texto adicional."
+        )
+        user_content = (
+            f"Descripción de la comida: \"{description}\"\n\n"
+            f"Ingredientes conocidos en la base de datos (usá estos nombres exactos si hay match): "
+            f"{catalog_excerpt}\n\n"
+            "Devolvé un JSON con este esquema exacto:\n"
+            "{\n"
+            '  "items": [\n'
+            '    {"ingredient": "nombre", "quantity_g": 150.0, "calories_kcal": 195.0, "protein_g": 28.0}\n'
+            "  ],\n"
+            '  "meal_type_guess": "almuerzo"\n'
+            "}\n\n"
+            "Reglas:\n"
+            "- meal_type_guess: 'desayuno' (antes de las 11h o contexto), 'almuerzo' (12-15h), "
+            "'cena' (19-23h), 'snack' (colación entre comidas). Si no podés inferir, usá 'almuerzo'.\n"
+            "- Si no se especifica la cantidad, estimá una porción típica argentina.\n"
+            "- Calculá calories_kcal y protein_g por los gramos indicados (no por 100g).\n"
+            "- Usá valores nutricionales precisos: arroz cocido=130kcal/100g/2.7g prot, "
+            "pechuga pollo=165kcal/100g/31g prot, papa=87kcal/100g/1.9g prot.\n"
+            "- protein_g puede ser null si no corresponde (ej. azúcar, aceite)."
+        )
+
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_content},
+        ]
+        headers = {
+            "Authorization": f"Bearer {self._api_key}",
+            "Content-Type": "application/json",
+        }
+        payload = {
+            "model": self._model,
+            "messages": messages,
+            "temperature": _MEAL_PARSE_TEMPERATURE,
+            "response_format": {"type": "json_object"},
+        }
+
+        last_exc: Exception = RuntimeError("No attempt made")
+        raw = ""
+        for attempt in range(_MAX_RETRIES):
+            try:
+                async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
+                    response = await client.post(
+                        f"{self._base_url}/chat/completions",
+                        headers=headers,
+                        json=payload,
+                    )
+                    response.raise_for_status()
+                    data = response.json()
+                    raw = data["choices"][0]["message"]["content"]
+                    logger.info("DeepSeek parse_meal_description OK")
+                    break
+            except (httpx.TimeoutException, httpx.HTTPStatusError, KeyError) as exc:
+                last_exc = exc
+                if attempt < _MAX_RETRIES - 1:
+                    wait = 2 ** attempt
+                    logger.warning(
+                        "DeepSeek parse_meal_description attempt %d/%d failed: %s — retry in %ds",
+                        attempt + 1, _MAX_RETRIES, exc, wait,
+                    )
+                    await asyncio.sleep(wait)
+        else:
+            raise RuntimeError(
+                f"DeepSeek parse_meal_description failed after {_MAX_RETRIES} retries: {last_exc}"
+            ) from last_exc
+
+        # Validar con Pydantic, con un retry si la respuesta es inválida
+        for validation_attempt in range(2):
+            try:
+                parsed = _MealParseSchema.model_validate_json(raw)
+                break
+            except (ValidationError, json.JSONDecodeError) as exc:
+                if validation_attempt == 0:
+                    logger.warning(
+                        "parse_meal_description: respuesta inválida — reintentando: %s", exc
+                    )
+                    error_msg = (
+                        f"Tu respuesta anterior era inválida: {exc}. "
+                        "Reintentá con JSON estrictamente válido siguiendo el esquema."
+                    )
+                    messages.append({"role": "assistant", "content": raw})
+                    messages.append({"role": "user", "content": error_msg})
+                    payload["messages"] = messages
+                    try:
+                        async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
+                            response = await client.post(
+                                f"{self._base_url}/chat/completions",
+                                headers=headers,
+                                json=payload,
+                            )
+                            response.raise_for_status()
+                            data = response.json()
+                            raw = data["choices"][0]["message"]["content"]
+                    except (httpx.TimeoutException, httpx.HTTPStatusError, KeyError) as retry_exc:
+                        raise ValueError(
+                            f"parse_meal_description: fallo en retry de validación: {retry_exc}"
+                        ) from retry_exc
+                else:
+                    raise ValueError(
+                        f"parse_meal_description: JSON inválido después de 2 intentos: {exc}"
+                    ) from exc
+
+        return {
+            "items": [item.model_dump() for item in parsed.items],
+            "meal_type_guess": parsed.meal_type_guess,
+        }
 
     async def suggest_swap(self, request: SwapRequest) -> SwapResult:
         """Swap via IA — en Fase 2A el SwapService lo resuelve localmente sin IA."""
