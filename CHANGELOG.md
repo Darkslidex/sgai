@@ -5,6 +5,22 @@ Formato basado en [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [1.0.1] — 2026-03-25
+
+### Migración de Motor IA — DeepSeek → OpenRouter
+
+#### Cambiado
+- **Motor de IA**: migrado de DeepSeek V3 directo (`api.deepseek.com`) a **Xiaomi MiMo-V2-Flash** via OpenRouter (`openrouter.ai`)
+- **Variables de entorno**: `DEEPSEEK_BASE_URL` y `DEEPSEEK_API_KEY` ahora apuntan a OpenRouter. El adapter (`DeepSeekAdapter`) no requirió modificaciones de código — solo cambio de env vars en Coolify
+- **Modelo**: `deepseek-chat` → `xiaomi/mimo-v2-flash`
+
+#### Motivo
+- DeepSeek rechaza pagos con tarjeta de débito internacional argentina
+- MiMo-V2-Flash: 73.4% SWE-Bench Verified, 63% más barato que DeepSeek ($0.10/M vs $0.27/M input)
+- OpenRouter acepta métodos de pago internacionales (PayPal, tarjeta, crypto)
+
+---
+
 ## [1.0.0-mvp] — 2026-03-20
 
 ### Fase 4B — Seguridad, Dashboard final y Mood & Food

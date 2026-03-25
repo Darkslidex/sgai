@@ -4,9 +4,11 @@
 
 Sistema personal de planificación nutricional con IA. Diseñado para uso single-user con arquitectura hexagonal, deploy en VPS RackNerd y privacidad total de los datos.
 
+> **Motor IA (25/03/2026):** migrado de DeepSeek → **MiMo-V2-Flash** via OpenRouter. Ana usa **Gemini 2.5 Flash** via OpenRouter.
+
 ## Descripción
 
-SGAI no es una app de dietas convencional. Es una herramienta de gestión de recursos que usa análisis de datos, IA (DeepSeek) y telemetría biométrica para optimizar la adherencia al plan nutricional mediante:
+SGAI no es una app de dietas convencional. Es una herramienta de gestión de recursos que usa análisis de datos, IA (MiMo-V2-Flash via OpenRouter) y telemetría biométrica para optimizar la adherencia al plan nutricional mediante:
 
 - **Batch Cooking 1x5**: planificación semanal que minimiza tiempo de cocina
 - **Precios híbridos**: datos reales de supermercados (manual → SEPA → scraping)
@@ -56,7 +58,7 @@ El bot de Telegram de SGAI se puede desactivar con `TELEGRAM_BOT_ENABLED=false` 
 - PostgreSQL 15+
 - Cuenta Railway (para deploy)
 - Token de bot de Telegram (`@BotFather`)
-- API Key de DeepSeek
+- API Key de OpenRouter (motor IA: MiMo-V2-Flash)
 
 ## Instalación Local
 
@@ -94,9 +96,9 @@ streamlit run app.py
 | Variable | Descripción | Ejemplo |
 |----------|-------------|---------|
 | `DATABASE_URL` | URL async de PostgreSQL | `postgresql+asyncpg://user:pass@host/db` |
-| `DEEPSEEK_API_KEY` | API Key de DeepSeek | `sk-...` |
-| `DEEPSEEK_BASE_URL` | URL base de DeepSeek | `https://api.deepseek.com/v1` |
-| `DEEPSEEK_MODEL` | Modelo a usar | `deepseek-chat` |
+| `DEEPSEEK_API_KEY` | API Key de OpenRouter | `sk-or-v1-...` |
+| `DEEPSEEK_BASE_URL` | URL base del motor IA | `https://openrouter.ai/api/v1` |
+| `DEEPSEEK_MODEL` | Modelo a usar | `xiaomi/mimo-v2-flash` |
 | `TELEGRAM_BOT_TOKEN` | Token del bot | `123456:ABC...` |
 | `TELEGRAM_ALLOWED_CHAT_IDS` | Chat IDs autorizados (CSV) | `6513721904` |
 | `JWT_SECRET_KEY` | Clave para JWTs | `secreto-aleatorio-largo` |
