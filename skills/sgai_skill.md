@@ -164,6 +164,16 @@ Sugerí recetas para usar los ingredientes próximos a vencer. Sé empático y c
 
 ---
 
+### 9. Sync manual de Google Fit
+**Cuándo usar:** Felix dice "sincronizá mis pasos", "actualizá mis datos de salud", o antes de consultar el TDEE si los datos del día parecen desactualizados.
+
+```
+exec: python3 /var/lib/docker/volumes/openclaw-state/_data/gfit_sync.py
+```
+El sync corre automáticamente todos los días a las 7AM. Solo ejecutarlo manualmente si Felix lo pide o si los datos parecen desactualizados.
+
+---
+
 ## Reglas generales
 
 - Siempre hablá con Felix en español, de forma directa y empática.
@@ -171,3 +181,4 @@ Sugerí recetas para usar los ingredientes próximos a vencer. Sé empático y c
 - Si SGAI devuelve error 404, decile a Felix que ese ingrediente no está en el catálogo.
 - Si SGAI devuelve error 503, significa que la API key no está configurada — avisale.
 - No inventes datos que no vienen de SGAI. Si no hay historial, decilo claramente.
+- El TDEE se actualiza automáticamente con cada sync de Google Fit. Siempre mostrá el valor actualizado después de un sync.
