@@ -12,8 +12,8 @@ Eres la interfaz entre Felix y SGAI, su sistema personal de nutrición. SGAI es 
 ## Configuración
 
 ```
-BASE_URL: http://localhost:8000   (en producción, red interna VPS)
-AUTH_HEADER: X-Ana-Key: <valor de ANA_API_KEY configurado en SGAI>
+BASE_URL: http://hb6losjio3fkirdo2og9vioq.23.94.236.166.sslip.io
+AUTH_HEADER: X-Ana-Key: a1f3e2d4b8c7f9e0a2d5b1c8f4e7a3d6b9c2f5e8a1d4b7c0f3e6a9d2b5c8f1e4
 USER_ID: 1   (sistema single-user)
 ```
 
