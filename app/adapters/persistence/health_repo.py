@@ -33,6 +33,44 @@ class HealthRepository(HealthRepositoryPort):
         await self._session.refresh(orm)
         return health_log_to_domain(orm)
 
+    async def upsert_daily_log(self, log: HealthLog) -> HealthLog:
+        """Upsert: actualiza el registro del dia si existe, o inserta uno nuevo.
+
+        Fusiona los campos no-nulos del log entrante con los del registro existente.
+        Evita duplicados cuando Ana y el sync de Google Fit registran el mismo dia.
+        """
+        result = await self._session.execute(
+            select(HealthLogORM)
+            .where(
+                HealthLogORM.user_id == log.user_id,
+                HealthLogORM.date == log.date,
+            )
+            .order_by(HealthLogORM.created_at.desc())
+            .limit(1)
+        )
+        existing = result.scalar_one_or_none()
+
+        if existing is None:
+            return await self.log_health(log)
+
+        if log.sleep_score is not None:
+            existing.sleep_score = log.sleep_score
+        if log.stress_level is not None:
+            existing.stress_level = log.stress_level
+        if log.hrv is not None:
+            existing.hrv = log.hrv
+        if log.steps is not None:
+            existing.steps = log.steps
+        if log.mood is not None:
+            existing.mood = log.mood
+        if log.notes:
+            existing.notes = log.notes
+        existing.source = log.source
+
+        await self._session.flush()
+        await self._session.refresh(existing)
+        return health_log_to_domain(existing)
+
     async def get_logs(self, user_id: int, start: date, end: date) -> list[HealthLog]:
         result = await self._session.execute(
             select(HealthLogORM)
@@ -49,7 +87,7 @@ class HealthRepository(HealthRepositoryPort):
         result = await self._session.execute(
             select(HealthLogORM)
             .where(HealthLogORM.user_id == user_id)
-            .order_by(HealthLogORM.date.desc())
+            .order_by(HealthLogORM.date.desc(), HealthLogORM.created_at.desc())
             .limit(1)
         )
         orm = result.scalar_one_or_none()
