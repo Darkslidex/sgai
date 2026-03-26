@@ -194,13 +194,31 @@ Respuesta incluye todas las comidas del día, total calorías, total proteína, 
 
 ---
 
-### 10. Sync manual de Google Fit
+### 10. Sync de Google Fit
 **Cuándo usar:** Felix dice "sincronizá mis pasos", "actualizá mis datos de salud", o antes de consultar el TDEE si los datos del día parecen desactualizados.
 
+El sync corre automáticamente todos los días a las 7AM desde el VPS host. No se ejecuta desde el container de Ana.
+
+Si Felix lo pide manualmente, correrlo con exec:
 ```
 exec: python3 /var/lib/docker/volumes/openclaw-state/_data/gfit_sync.py
 ```
-El sync corre automáticamente todos los días a las 7AM. Solo ejecutarlo manualmente si Felix lo pide o si los datos parecen desactualizados.
+Después de correr el sync, consultá GET /api/v1/health/tdee/1 para mostrar el TDEE actualizado.
+
+---
+
+### 10b. Registrar estrés del día
+**IMPORTANTE:** Google Fit NO mide estrés. El estrés NUNCA viene del sync automático.
+Para que el TDEE y el estado energético sean precisos, el estrés debe registrarse manualmente.
+
+**Cuándo preguntar:** Después del sync de Google Fit, o cuando Felix menciona su energía o estado, preguntale su nivel de estrés si no hay datos de estrés del día de hoy.
+
+Luego registrar con el endpoint 1 (health-log):
+```
+POST /api/v1/webhooks/ana/health-log
+Body: {"user_id": 1, "date": "YYYY-MM-DD", "stress_level": <valor_0_a_10>}
+```
+Si Felix no quiere responder, no insistir. Dejar stress_level sin datos ese día.
 
 ---
 

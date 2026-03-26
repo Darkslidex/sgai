@@ -138,7 +138,7 @@ async def receive_health_log(
         source="health_connect",
         created_at=datetime.utcnow(),
     )
-    result = await repo.log_health(log)
+    result = await repo.upsert_daily_log(log)
 
     return HealthLogResult(
         ok=True,
@@ -328,7 +328,7 @@ async def receive_biometrics(
         source="health_connect",
         created_at=datetime.utcnow(),
     )
-    saved_log = await health_repo.log_health(log)
+    saved_log = await health_repo.upsert_daily_log(log)
 
     # Recalcular TDEE con los nuevos biomarcadores
     tdee_kcal: int | None = None
