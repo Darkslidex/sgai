@@ -57,6 +57,11 @@ class Settings(BaseSettings):
     app_env: Literal["development", "staging", "production"] = Field(
         "development", description="Entorno de ejecución"
     )
+    # === LLM Router ===
+    llm_circuit_breaker_max_failures: int = Field(3, description="Fallos antes de abrir circuit breaker")
+    llm_circuit_breaker_cooldown: int = Field(600, description="Segundos de cooldown")
+    llm_default_timeout: float = Field(30.0, description="Timeout LLM en segundos")
+
     app_debug: bool = Field(False, description="Modo debug")
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] = Field(
         "INFO", description="Nivel de logging"

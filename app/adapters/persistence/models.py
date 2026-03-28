@@ -16,3 +16,5 @@ from app.adapters.persistence.recipe_ingredient_orm import RecipeIngredientORM  
 from app.adapters.persistence.pantry_item_orm import PantryItemORM  # noqa: F401
 from app.adapters.persistence.optimization_log_orm import OptimizationLogORM  # noqa: F401
 from app.adapters.persistence.meal_log_orm import MealLogORM  # noqa: F401
+from app.adapters.persistence.llm_usage_orm import LLMUsageLogORM  # noqa: F401
+from app.adapters.persistence.ana_access_log_orm import AnaAccessLogORM  # noqa: F401

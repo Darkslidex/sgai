@@ -13,6 +13,8 @@ import logging
 import httpx
 from pydantic import BaseModel, ValidationError
 
+from app.adapters.llm.llm_router import LLMRouter, TaskType
+
 from app.adapters.ai.prompts.planning_prompts import (
     SYSTEM_PROMPT,
     TASK_PROMPT,
@@ -82,47 +84,18 @@ class DeepSeekAdapter(AIPlannerPort):
         self._api_key = api_key
         self._base_url = base_url.rstrip("/")
         self._model = model
+        self._llm_router = LLMRouter(api_key=api_key, base_url=base_url)
 
     async def _call_api(self, messages: list[dict]) -> tuple[str, int]:
-        """Llama a la API de DeepSeek con retry y backoff exponencial."""
-        headers = {
-            "Authorization": f"Bearer {self._api_key}",
-            "Content-Type": "application/json",
-        }
-        payload = {
-            "model": self._model,
-            "messages": messages,
-            "temperature": _TEMPERATURE,
-            "response_format": {"type": "json_object"},
-        }
-
-        last_exc: Exception = RuntimeError("No attempt made")
-        for attempt in range(_MAX_RETRIES):
-            try:
-                async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
-                    response = await client.post(
-                        f"{self._base_url}/chat/completions",
-                        headers=headers,
-                        json=payload,
-                    )
-                    response.raise_for_status()
-                    data = response.json()
-                    content = data["choices"][0]["message"]["content"]
-                    tokens = data.get("usage", {}).get("total_tokens", 0)
-                    logger.info("DeepSeek API call OK — tokens: %d", tokens)
-                    return content, tokens
-
-            except (httpx.TimeoutException, httpx.HTTPStatusError, KeyError) as exc:
-                last_exc = exc
-                if attempt < _MAX_RETRIES - 1:
-                    wait = 2 ** attempt
-                    logger.warning(
-                        "DeepSeek attempt %d/%d failed: %s — retry in %ds",
-                        attempt + 1, _MAX_RETRIES, exc, wait,
-                    )
-                    await asyncio.sleep(wait)
-
-        raise RuntimeError(f"DeepSeek API failed after {_MAX_RETRIES} retries: {last_exc}") from last_exc
+        """Llama al LLMRouter con fallback chain y circuit breaker."""
+        response = await self._llm_router.generate(
+            task_type=TaskType.STRUCTURED_JSON,
+            messages=messages,
+            temperature=_TEMPERATURE,
+            timeout=_TIMEOUT,
+            response_format={"type": "json_object"},
+        )
+        return response.content, response.tokens_input + response.tokens_output
 
     async def generate_plan(self, context: PlanningContext) -> WeeklyPlanResult:
         """Genera un plan semanal Batch Cooking 1x5."""

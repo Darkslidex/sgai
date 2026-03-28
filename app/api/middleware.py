@@ -22,8 +22,10 @@ _EXCLUDED_PATHS = {"/health"}
 # Endpoints de IA (costo por token): 10 req/hora
 _AI_PATH_PREFIXES = ("/api/v1/plan", "/api/v1/swap")
 # Rate limit tiers: (max_requests, window_seconds)
+_WEBHOOK_PATH_PREFIX = "/api/v1/webhooks"
 _TIERS = {
     "ai": (10, 3600),
+    "webhook": (60, 60),   # 60 req/min para webhooks de Ana
     "general": (60, 60),
 }
 
@@ -45,7 +47,12 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         client_ip = request.client.host if request.client else "unknown"
         path = request.url.path
 
-        tier = "ai" if any(path.startswith(p) for p in _AI_PATH_PREFIXES) else "general"
+        if any(path.startswith(p) for p in _AI_PATH_PREFIXES):
+            tier = "ai"
+        elif path.startswith(_WEBHOOK_PATH_PREFIX):
+            tier = "webhook"
+        else:
+            tier = "general"
         max_requests, window_seconds = _TIERS[tier]
         key = f"{client_ip}:{tier}"
         now = time.monotonic()
@@ -88,4 +95,44 @@ class RequestLoggingMiddleware(BaseHTTPMiddleware):
             response.status_code,
             elapsed_ms,
         )
+        return response
+
+
+class AnaAuditMiddleware(BaseHTTPMiddleware):
+    """Registra en DB cada request autenticado con X-Ana-Key para audit trail."""
+
+    async def dispatch(self, request: Request, call_next) -> Response:
+        # Solo auditar requests con X-Ana-Key
+        if not request.headers.get("X-Ana-Key"):
+            return await call_next(request)
+
+        start = time.monotonic()
+        response = await call_next(request)
+        elapsed_ms = int((time.monotonic() - start) * 1000)
+
+        # Fire-and-forget: no bloqueamos la respuesta por el log
+        try:
+            from datetime import datetime
+            from app.database import get_session
+            from app.adapters.persistence.ana_access_log_orm import AnaAccessLogORM
+
+            async def _log():
+                async with get_session() as session:
+                    entry = AnaAccessLogORM(
+                        timestamp=datetime.utcnow(),
+                        endpoint=request.url.path,
+                        method=request.method,
+                        response_code=response.status_code,
+                        response_time_ms=elapsed_ms,
+                        ip_address=request.client.host if request.client else None,
+                        user_agent=request.headers.get("user-agent", "")[:300],
+                    )
+                    session.add(entry)
+                    await session.commit()
+
+            import asyncio
+            asyncio.create_task(_log())
+        except Exception:
+            pass  # No interrumpir la respuesta por fallo en audit log
+
         return response

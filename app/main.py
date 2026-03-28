@@ -13,7 +13,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.health import router as health_router
 from app.api.error_handlers import register_error_handlers
-from app.api.middleware import RateLimitMiddleware, RequestLoggingMiddleware
+from app.api.middleware import AnaAuditMiddleware, RateLimitMiddleware, RequestLoggingMiddleware
 from app.api.v1 import router as v1_router
 from app.config import get_settings
 from app.database import close_db, init_db
@@ -40,6 +40,10 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     scheduler.add_job(scheduled_backup, "cron", hour=3, minute=0, id="daily_backup")
 
     # Limpieza semanal de health_logs > 90 días (domingo 02:00 UTC)
+    # Alertas del sistema cada 15 minutos
+    from app.domain.services.alert_service import check_and_alert
+    scheduler.add_job(check_and_alert, "interval", minutes=15, id="system_alerts")
+
     scheduler.add_job(
         _cleanup_old_health_logs,
         "cron",
@@ -324,6 +328,7 @@ def create_app() -> FastAPI:
         lifespan=lifespan,
     )
 
+    app.add_middleware(AnaAuditMiddleware)
     app.add_middleware(RateLimitMiddleware)
     app.add_middleware(RequestLoggingMiddleware)
     app.add_middleware(

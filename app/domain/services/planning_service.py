@@ -15,6 +15,7 @@ from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 
 from app.domain.models.planning import WeeklyPlan
+from app.domain.validators.plan_validator import ValidatedWeeklyPlan, validate_weekly_plan
 from app.domain.models.recipe import Recipe
 from app.domain.ports.ai_planner_port import (
     AIPlannerPort,
@@ -184,7 +185,27 @@ class PlanningService:
         if self._consumption_ratio_service is not None:
             result = await self._validate_shopping_list(user_id, result)
 
-        # ── 5. Persistir ─────────────────────────────────────────────────────
+        # ── 5. Validar output del LLM con Pydantic (anti-alucinaciones) ─────
+        _plan_raw = {
+            "days": [{"day": d.day, "lunch": d.lunch, "dinner": d.dinner} for d in result.days],
+            "shopping_list": [
+                {"name": i.ingredient_name, "quantity": i.quantity,
+                 "unit": i.unit, "estimated_cost_ars": i.estimated_price_ars}
+                for i in result.shopping_list
+            ],
+            "total_cost_ars": result.total_cost_ars,
+            "cooking_day": result.cooking_day,
+            "prep_steps": result.prep_steps,
+        }
+        try:
+            validate_weekly_plan(_plan_raw)
+        except Exception as val_exc:
+            logger.error("Plan LLM falló validación Pydantic: %s | raw=%s", val_exc, _plan_raw)
+            raise ValueError(
+                f"El plan generado por IA contiene datos inválidos: {val_exc}"
+            ) from val_exc
+
+        # ── 6. Persistir ─────────────────────────────────────────────────────
         plan_json = {
             "days": [{"day": d.day, "lunch": d.lunch, "dinner": d.dinner} for d in result.days],
             "cooking_day": result.cooking_day,
