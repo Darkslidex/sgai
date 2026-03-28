@@ -5,7 +5,7 @@ from datetime import datetime
 from sqlalchemy import Boolean, DateTime, Float, Integer, String
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
-from app.adapters.persistence.models import Base
+from app.database import Base
 
 
 class LLMUsageLogORM(Base):

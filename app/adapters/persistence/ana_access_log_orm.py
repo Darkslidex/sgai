@@ -3,7 +3,7 @@
 from datetime import datetime
 from sqlalchemy import DateTime, Integer, String
 from sqlalchemy.orm import Mapped, mapped_column
-from app.adapters.persistence.models import Base
+from app.database import Base
 
 
 class AnaAccessLogORM(Base):
