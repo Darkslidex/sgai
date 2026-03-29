@@ -1,6 +1,7 @@
 """Endpoints de consulta de registros de consumo alimentario.
 
 GET /api/v1/meal-logs/daily/{user_id}?date=YYYY-MM-DD
+GET /api/v1/meal-logs/consumed-ingredients/{user_id}?start_date=YYYY-MM-DD&end_date=YYYY-MM-DD
 """
 
 from datetime import date
@@ -116,4 +117,71 @@ async def get_daily_summary(
         tdee_kcal=tdee_kcal,
         calories_remaining=calories_remaining,
         meals=meals,
+    )
+
+
+# ── Consumo agregado por rango de fechas ─────────────────────────────────────
+
+
+class ConsumedIngredientEntry(BaseModel):
+    ingredient: str
+    total_quantity_g: float
+
+
+class ConsumedIngredientsResponse(BaseModel):
+    user_id: int
+    start_date: str
+    end_date: str
+    total_days: int
+    ingredients: list[ConsumedIngredientEntry]
+
+
+@router.get(
+    "/consumed-ingredients/{user_id}",
+    response_model=ConsumedIngredientsResponse,
+    summary="Ingredientes consumidos en un rango de fechas (para actualizar alacena)",
+)
+async def get_consumed_ingredients(
+    user_id: int,
+    start_date: date = Query(..., description="Fecha de inicio YYYY-MM-DD"),
+    end_date: date = Query(..., description="Fecha de fin YYYY-MM-DD (inclusive)"),
+    db: AsyncSession = Depends(get_db),
+) -> ConsumedIngredientsResponse:
+    """Agrega todos los ingredientes consumidos entre start_date y end_date.
+
+    Útil para que Ana determine cuánto descontar de la alacena sin tener que
+    consultar cada día por separado.
+    """
+    if end_date < start_date:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="end_date debe ser igual o posterior a start_date.",
+        )
+
+    user_repo = UserRepository(db)
+    if await user_repo.get_profile(user_id) is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Usuario {user_id} no encontrado.",
+        )
+
+    meal_repo = MealLogRepository(db)
+    totals = await meal_repo.get_consumed_ingredients_range(user_id, start_date, end_date)
+
+    ingredients = sorted(
+        [
+            ConsumedIngredientEntry(ingredient=name, total_quantity_g=round(grams, 1))
+            for name, grams in totals.items()
+        ],
+        key=lambda x: x.ingredient,
+    )
+
+    total_days = (end_date - start_date).days + 1
+
+    return ConsumedIngredientsResponse(
+        user_id=user_id,
+        start_date=start_date.isoformat(),
+        end_date=end_date.isoformat(),
+        total_days=total_days,
+        ingredients=ingredients,
     )

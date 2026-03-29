@@ -78,6 +78,35 @@ class MealLogRepository:
         )
         return [_orm_to_domain(row) for row in result.scalars()]
 
+    async def get_by_date_range(self, user_id: int, start: date, end: date) -> list[MealLog]:
+        """Retorna todos los meal_logs de un usuario entre start y end (inclusive)."""
+        result = await self._session.execute(
+            select(MealLogORM)
+            .where(
+                MealLogORM.user_id == user_id,
+                MealLogORM.date >= start,
+                MealLogORM.date <= end,
+            )
+            .order_by(MealLogORM.date.asc(), MealLogORM.created_at.asc())
+        )
+        return [_orm_to_domain(row) for row in result.scalars()]
+
+    async def get_consumed_ingredients_range(
+        self, user_id: int, start: date, end: date
+    ) -> dict[str, float]:
+        """Agrega ingredientes consumidos en el rango de fechas.
+
+        Retorna {nombre_ingrediente_lowercase: total_gramos} sumando todos los
+        meal_log.items de todos los días del rango.
+        """
+        logs = await self.get_by_date_range(user_id, start, end)
+        totals: dict[str, float] = {}
+        for log in logs:
+            for item in log.items:
+                key = item.ingredient.lower().strip()
+                totals[key] = totals.get(key, 0.0) + item.quantity_g
+        return totals
+
     async def get_daily_summary(self, user_id: int, target_date: date) -> dict:
         """Retorna resumen diario: total de calorías, proteínas y lista de comidas."""
         logs = await self.get_by_date(user_id, target_date)

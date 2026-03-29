@@ -1,13 +1,15 @@
 """Endpoints CRUD para precios de mercado y despensa."""
 
-from datetime import datetime
+from datetime import date, datetime
 from statistics import mean
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
+from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.adapters.persistence.ingredient_repo import IngredientRepository
 from app.adapters.persistence.market_repo import MarketRepository
+from app.adapters.persistence.meal_log_repo import MealLogRepository
 from app.api.schemas.market import (
     CheapestPriceResponse,
     MarketPriceCreate,
@@ -20,6 +22,7 @@ from app.api.schemas.market import (
 from app.database import get_db
 from app.domain.models.market import MarketPrice
 from app.domain.models.pantry_item import PantryItem
+from app.domain.services.pantry_service import PantryService
 
 router = APIRouter(prefix="/market", tags=["market"])
 
@@ -100,6 +103,208 @@ async def get_pantry(
     """Lista el inventario de la despensa de un usuario."""
     items = await repo.get_pantry(user_id)
     return [PantryItemResponse.model_validate(i.__dict__) for i in items]
+
+
+# ── Schemas para consume y sync ───────────────────────────────────────────────
+
+
+class ConsumeItemRequest(BaseModel):
+    ingredient_name: str
+    quantity_g: float
+
+
+class ConsumeItemResponse(BaseModel):
+    ingredient_name: str
+    ingredient_id: int
+    quantity_consumed_g: float
+    quantity_remaining: float | None
+    unit: str | None
+    status: str  # "consumed", "depleted", "not_in_pantry", "not_found"
+
+
+class SyncResult(BaseModel):
+    ingredient: str
+    quantity_consumed_g: float
+    quantity_remaining: float | None
+    unit: str | None
+    status: str  # "consumed", "depleted", "not_in_pantry", "not_found"
+
+
+class SyncFromMealsResponse(BaseModel):
+    user_id: int
+    start_date: str
+    end_date: str
+    results: list[SyncResult]
+    total_consumed: int
+    total_depleted: int
+    total_not_in_pantry: int
+    total_not_found: int
+
+
+# ── Endpoint: consumir un ítem de la alacena ─────────────────────────────────
+
+
+@router.post(
+    "/pantry/{user_id}/consume",
+    response_model=ConsumeItemResponse,
+    summary="Descuenta un ingrediente de la alacena por nombre",
+)
+async def consume_pantry_item(
+    user_id: int,
+    body: ConsumeItemRequest,
+    market_repo: MarketRepository = Depends(get_market_repo),
+    ing_repo: IngredientRepository = Depends(get_ingredient_repo),
+) -> ConsumeItemResponse:
+    """Resta quantity_g del ingrediente en la alacena.
+
+    Busca el ingrediente por nombre (fuzzy). Si la cantidad llega a 0 o menos,
+    elimina el item de la alacena. Útil para que Ana descuente ingredientes
+    específicos sin necesidad de calcular cantidades manualmente.
+    """
+    if body.quantity_g <= 0:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="quantity_g debe ser positiva.",
+        )
+
+    matches = await ing_repo.search_ingredients(body.ingredient_name)
+    if not matches:
+        return ConsumeItemResponse(
+            ingredient_name=body.ingredient_name,
+            ingredient_id=0,
+            quantity_consumed_g=body.quantity_g,
+            quantity_remaining=None,
+            unit=None,
+            status="not_found",
+        )
+
+    ingredient = matches[0]
+
+    existing = await market_repo.get_pantry_item(user_id, ingredient.id)
+    if existing is None:
+        return ConsumeItemResponse(
+            ingredient_name=ingredient.name,
+            ingredient_id=ingredient.id,
+            quantity_consumed_g=body.quantity_g,
+            quantity_remaining=None,
+            unit=ingredient.unit,
+            status="not_in_pantry",
+        )
+
+    pantry_service = PantryService(market_repo, ing_repo)
+    updated = await pantry_service.remove_item(user_id, ingredient.id, body.quantity_g)
+
+    if updated is None:
+        return ConsumeItemResponse(
+            ingredient_name=ingredient.name,
+            ingredient_id=ingredient.id,
+            quantity_consumed_g=body.quantity_g,
+            quantity_remaining=0.0,
+            unit=ingredient.unit,
+            status="depleted",
+        )
+
+    return ConsumeItemResponse(
+        ingredient_name=ingredient.name,
+        ingredient_id=ingredient.id,
+        quantity_consumed_g=body.quantity_g,
+        quantity_remaining=round(updated.quantity_amount, 2),
+        unit=updated.unit,
+        status="consumed",
+    )
+
+
+# ── Endpoint: sincronizar alacena desde meal_logs ────────────────────────────
+
+
+@router.post(
+    "/pantry/{user_id}/sync-from-meals",
+    response_model=SyncFromMealsResponse,
+    summary="Sincroniza la alacena descontando todo lo consumido en un rango de fechas",
+)
+async def sync_pantry_from_meals(
+    user_id: int,
+    start_date: date = Query(..., description="Fecha de inicio YYYY-MM-DD"),
+    end_date: date = Query(..., description="Fecha de fin YYYY-MM-DD (inclusive)"),
+    db: AsyncSession = Depends(get_db),
+) -> SyncFromMealsResponse:
+    """Lee los meal_logs del rango de fechas, agrega por ingrediente y descuenta de la alacena.
+
+    Este es el endpoint principal para mantener la alacena sincronizada. Ana debe
+    llamarlo con el rango de días donde hubo comidas registradas en lugar de intentar
+    actualizar cada ingrediente manualmente.
+
+    - status=consumed: se descontó correctamente, quedan unidades.
+    - status=depleted: se agotó completamente (eliminado de la alacena).
+    - status=not_in_pantry: el ingrediente existe en la DB pero no estaba en la alacena.
+    - status=not_found: el nombre del ingrediente no se encontró en la tabla de ingredientes.
+    """
+    if end_date < start_date:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="end_date debe ser igual o posterior a start_date.",
+        )
+
+    meal_repo = MealLogRepository(db)
+    market_repo = MarketRepository(db)
+    ing_repo = IngredientRepository(db)
+    pantry_service = PantryService(market_repo, ing_repo)
+
+    consumed = await meal_repo.get_consumed_ingredients_range(user_id, start_date, end_date)
+
+    results: list[SyncResult] = []
+    for ingredient_name, total_g in consumed.items():
+        matches = await ing_repo.search_ingredients(ingredient_name)
+        if not matches:
+            results.append(SyncResult(
+                ingredient=ingredient_name,
+                quantity_consumed_g=round(total_g, 1),
+                quantity_remaining=None,
+                unit=None,
+                status="not_found",
+            ))
+            continue
+
+        ingredient = matches[0]
+        existing = await market_repo.get_pantry_item(user_id, ingredient.id)
+        if existing is None:
+            results.append(SyncResult(
+                ingredient=ingredient.name,
+                quantity_consumed_g=round(total_g, 1),
+                quantity_remaining=None,
+                unit=ingredient.unit,
+                status="not_in_pantry",
+            ))
+            continue
+
+        updated = await pantry_service.remove_item(user_id, ingredient.id, total_g)
+        if updated is None:
+            results.append(SyncResult(
+                ingredient=ingredient.name,
+                quantity_consumed_g=round(total_g, 1),
+                quantity_remaining=0.0,
+                unit=ingredient.unit,
+                status="depleted",
+            ))
+        else:
+            results.append(SyncResult(
+                ingredient=ingredient.name,
+                quantity_consumed_g=round(total_g, 1),
+                quantity_remaining=round(updated.quantity_amount, 2),
+                unit=updated.unit,
+                status="consumed",
+            ))
+
+    return SyncFromMealsResponse(
+        user_id=user_id,
+        start_date=start_date.isoformat(),
+        end_date=end_date.isoformat(),
+        results=results,
+        total_consumed=sum(1 for r in results if r.status == "consumed"),
+        total_depleted=sum(1 for r in results if r.status == "depleted"),
+        total_not_in_pantry=sum(1 for r in results if r.status == "not_in_pantry"),
+        total_not_found=sum(1 for r in results if r.status == "not_found"),
+    )
 
 
 @router.get(

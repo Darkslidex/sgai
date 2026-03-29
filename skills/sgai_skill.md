@@ -182,7 +182,9 @@ Body:
 }
 ```
 Respuesta incluye ítems parseados con calorías y proteínas por ingrediente.
-Después de registrar, siempre mostrá el resumen: total calorías + cuántas quedan para el día.
+Después de registrar:
+1. Mostrá el resumen: total calorías + cuántas quedan para el día.
+2. Automáticamente sincronizá la alacena llamando a `POST /api/v1/market/pantry/1/sync-from-meals?start_date=<hoy>&end_date=<hoy>` para descontar lo que acaba de consumir. Hacelo silenciosamente — no lo menciones a menos que haya algún `not_found` que Felix deba saber.
 
 ### 9b. Ver resumen calórico del día
 **Cuándo usar:** Felix pregunta cuánto comió hoy, cuántas calorías le quedan, o quiere ver su consumo diario.
@@ -191,6 +193,57 @@ Después de registrar, siempre mostrá el resumen: total calorías + cuántas qu
 GET /api/v1/meal-logs/daily/1?date=YYYY-MM-DD
 ```
 Respuesta incluye todas las comidas del día, total calorías, total proteína, TDEE y `calories_remaining`.
+
+---
+
+### 9c. Ver todos los ingredientes consumidos en un rango de fechas
+**Cuándo usar:** Antes de actualizar la alacena, para saber cuánto de cada ingrediente consumió Felix en varios días.
+
+```
+GET /api/v1/meal-logs/consumed-ingredients/1?start_date=YYYY-MM-DD&end_date=YYYY-MM-DD
+```
+Respuesta: lista de ingredientes con `total_quantity_g` acumulada en el rango. Útil para revisar antes de hacer el sync.
+
+---
+
+### 9d. Descontar un ingrediente específico de la alacena
+**Cuándo usar:** Felix dice "usé 200g de pollo" o quiere corregir manualmente un item de la alacena.
+
+```
+POST /api/v1/market/pantry/1/consume
+Header: X-Ana-Key: <key>
+Body:
+{
+  "ingredient_name": "pechuga de pollo",
+  "quantity_g": 200.0
+}
+```
+Posibles status en la respuesta:
+- `consumed`: se descontó, `quantity_remaining` muestra lo que queda.
+- `depleted`: se agotó, ya no queda en la alacena.
+- `not_in_pantry`: el ingrediente existe pero no estaba registrado en la alacena de Felix.
+- `not_found`: el nombre del ingrediente no matchea ningún ingrediente conocido.
+
+---
+
+### 9e. ⭐ Sincronizar alacena desde comidas registradas (USAR ESTE, no calcular manual)
+**Cuándo usar:** Siempre que Felix pida actualizar la alacena, o cuando haya discrepancias entre lo que comió y lo que dice la alacena. También llamarlo automáticamente después de registrar una comida si Felix tiene alacena cargada.
+
+**REGLA CRÍTICA:** NUNCA intentes calcular manualmente cuánto descontar ni hagas múltiples llamadas día por día. Usá este endpoint con el rango de fechas correcto y él hace todo.
+
+```
+POST /api/v1/market/pantry/1/sync-from-meals?start_date=YYYY-MM-DD&end_date=YYYY-MM-DD
+Header: X-Ana-Key: <key>
+```
+Lee todos los meal_logs del rango, agrega por ingrediente, y descuenta de la alacena en una sola operación.
+
+Respuesta incluye `results` con cada ingrediente y su status (`consumed`, `depleted`, `not_in_pantry`, `not_found`), más totales.
+
+Cómo informar a Felix el resultado:
+- Mencioná los items `consumed` con la cantidad que queda.
+- Mencioná los `depleted` (se agotaron).
+- Si hay `not_in_pantry`: "Usé X pero no estaba en tu alacena registrada".
+- Si hay `not_found`: "No reconocí el ingrediente Y — revisá el nombre".
 
 ---
 
